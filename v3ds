@@ -16,7 +16,7 @@ from datetime import datetime
 TOKEN = ''  # YOUR BOT TOKEN HERE
 SERVER_LIMIT = 1
 database_file = 'database.txt'
-BANNER_URL = "https://media.discordapp.net/attachments/1354703111268335647/1358696583738425374/Picsart_25-03-26_16-36-41-987.jpg"
+BANNER_URL = "https://media.discordapp.net/attachments/1358701388997070859/1358709346141343814/Picsart_25-04-07_13-18-52-202.jpg?ex=67f4d42f&is=67f382af&hm=2ff1a286e9fe86b580603949dea84c24ac3fe03e0862579b54e63f9b247e6de8&"
 
 # Modern color scheme
 COLOR_PRIMARY = 0x6A5ACD  # Slate Blue
