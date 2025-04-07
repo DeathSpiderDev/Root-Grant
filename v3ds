@@ -1,4 +1,4 @@
-import random
+bot.run(TOKENimport random
 import logging
 import subprocess
 import sys
@@ -12,11 +12,13 @@ import docker
 import asyncio
 from discord import app_commands
 from datetime import datetime
+import psutil
+import platform
 
 TOKEN = ''  # YOUR BOT TOKEN HERE
 SERVER_LIMIT = 1
 database_file = 'database.txt'
-BANNER_URL = "https://media.discordapp.net/attachments/1358701388997070859/1358709346141343814/Picsart_25-04-07_13-18-52-202.jpg?ex=67f4d42f&is=67f382af&hm=2ff1a286e9fe86b580603949dea84c24ac3fe03e0862579b54e63f9b247e6de8&"
+BANNER_URL = "https://media.discordapp.net/attachments/1354703111268335647/1358696583738425374/Picsart_25-03-26_16-36-41-987.jpg"
 
 # Modern color scheme
 COLOR_PRIMARY = 0x6A5ACD  # Slate Blue
@@ -31,6 +33,46 @@ intents.message_content = False
 
 bot = commands.Bot(command_prefix='/', intents=intents)
 client = docker.from_env()
+
+def get_system_status():
+    """Get comprehensive system status including Docker containers"""
+    # System resources
+    cpu_percent = psutil.cpu_percent(interval=1)
+    mem = psutil.virtual_memory()
+    disk = psutil.disk_usage('/')
+    net_io = psutil.net_io_counters()
+    
+    # Docker container count
+    try:
+        container_count = len(client.containers.list(all=True))
+        running_containers = len(client.containers.list())
+    except:
+        container_count = 0
+        running_containers = 0
+    
+    return {
+        'cpu': cpu_percent,
+        'ram': {
+            'total': mem.total / (1024**3),  # GB
+            'used': mem.used / (1024**3),
+            'percent': mem.percent
+        },
+        'disk': {
+            'total': disk.total / (1024**3),
+            'used': disk.used / (1024**3),
+            'percent': disk.percent
+        },
+        'network': {
+            'sent': net_io.bytes_sent / (1024**2),  # MB
+            'recv': net_io.bytes_recv / (1024**2)
+        },
+        'os': f"{platform.system()} {platform.release()}",
+        'containers': {
+            'total': container_count,
+            'running': running_containers
+        },
+        'uptime': str(datetime.now() - datetime.fromtimestamp(psutil.boot_time())).split('.')[0]
+    }
 
 def add_to_database(user, container_name, ssh_command):
     with open(database_file, 'a') as f:
@@ -119,6 +161,77 @@ async def change_status():
     except Exception as e:
         print(f"Failed to update status: {e}")
 
+@bot.tree.command(name="status", description="Shows detailed system resource usage")
+async def system_status(interaction: discord.Interaction):
+    status = get_system_status()
+    
+    embed = create_embed(
+        title="📊 System Status Dashboard",
+        color=COLOR_INFO
+    )
+    
+    # CPU Status
+    cpu_status = f"{status['cpu']}%"
+    if status['cpu'] < 50:
+        cpu_emoji = "🟢"
+    elif status['cpu'] < 80:
+        cpu_emoji = "🟡"
+    else:
+        cpu_emoji = "🔴"
+    
+    # RAM Status
+    ram_status = f"{status['ram']['used']:.1f}GB / {status['ram']['total']:.1f}GB ({status['ram']['percent']}%)"
+    if status['ram']['percent'] < 60:
+        ram_emoji = "🟢"
+    elif status['ram']['percent'] < 85:
+        ram_emoji = "🟡"
+    else:
+        ram_emoji = "🔴"
+    
+    # Disk Status
+    disk_status = f"{status['disk']['used']:.1f}GB / {status['disk']['total']:.1f}GB ({status['disk']['percent']}%)"
+    if status['disk']['percent'] < 70:
+        disk_emoji = "🟢"
+    elif status['disk']['percent'] < 90:
+        disk_emoji = "🟡"
+    else:
+        disk_emoji = "🔴"
+    
+    # System Info
+    embed.add_field(
+        name="🖥️ System Information",
+        value=f"**OS:** {status['os']}\n"
+              f"**Uptime:** {status['uptime']}\n"
+              f"**Containers:** {status['containers']['running']}/{status['containers']['total']} running",
+        inline=False
+    )
+    
+    # Resource Usage
+    embed.add_field(
+        name="📈 Resource Usage",
+        value=f"{cpu_emoji} **CPU:** {cpu_status}\n"
+              f"{ram_emoji} **RAM:** {ram_status}\n"
+              f"{disk_emoji} **Disk:** {disk_status}\n"
+              f"🌐 **Network:** ↑{status['network']['sent']:.1f}MB ↓{status['network']['recv']:.1f}MB",
+        inline=False
+    )
+    
+    # Performance Bars (Visual Representation)
+    performance_bar = (
+        f"```\n"
+        f"CPU: [{'█' * int(status['cpu']/10)}{' ' * (10 - int(status['cpu']/10))}] {status['cpu']}%\n"
+        f"RAM: [{'█' * int(status['ram']['percent']/10)}{' ' * (10 - int(status['ram']['percent']/10))}] {status['ram']['percent']}%\n"
+        f"DSK: [{'█' * int(status['disk']['percent']/10)}{' ' * (10 - int(status['disk']['percent']/10))}] {status['disk']['percent']}%\n"
+        f"```"
+    )
+    embed.add_field(
+        name="📊 Performance Visualization",
+        value=performance_bar,
+        inline=False
+    )
+    
+    await interaction.response.send_message(embed=embed)
+
 async def regen_ssh_command(interaction: discord.Interaction, container_name: str):
     user = str(interaction.user)
     container_id = get_container_id_from_database(user, container_name)
@@ -148,7 +261,7 @@ async def regen_ssh_command(interaction: discord.Interaction, container_name: st
     if ssh_session_line:
         dm_embed = discord.Embed(
             title="🔐 New SSH Credentials",
-            description=f"Here's your new SSH access for your VPS:",
+            description="Here's your new SSH access for your VPS:",
             color=COLOR_SUCCESS,
             timestamp=datetime.utcnow()
         )
@@ -576,7 +689,8 @@ async def help_command(interaction: discord.Interaction):
     
     embed.add_field(
         name="ℹ️ Information",
-        value="▸ `/list` - Your instances\n"
+        value="▸ `/status` - System resources\n"
+              "▸ `/list` - Your instances\n"
               "▸ `/ping` - Check bot status\n"
               "▸ `/help` - This message",
         inline=False
