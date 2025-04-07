@@ -16,8 +16,7 @@ import psutil
 import platform
 
 TOKEN = ''  # YOUR BOT TOKEN HERE
-SERVER_LIMIT = 10  # Per-user limit
-MAX_GLOBAL_VPS = 10  # Maximum total VPS instances allowed
+SERVER_LIMIT = 1
 database_file = 'database.txt'
 BANNER_URL = "https://media.discordapp.net/attachments/1354703111268335647/1358696583738425374/Picsart_25-03-26_16-36-41-987.jpg"
 
@@ -89,13 +88,6 @@ def remove_from_database(ssh_command):
             if ssh_command not in line:
                 f.write(line)
 
-def count_all_servers():
-    """Count total VPS instances across all users"""
-    if not os.path.exists(database_file):
-        return 0
-    with open(database_file, 'r') as f:
-        return len(f.readlines())
-
 async def capture_ssh_session_line(process):
     while True:
         output = await process.stdout.readline()
@@ -128,13 +120,9 @@ def get_user_servers(user):
 def count_user_servers(user):
     return len(get_user_servers(user))
 
-def get_container_id_from_database(user, container_name=None):
+def get_container_id_from_database(user):
     servers = get_user_servers(user)
     if servers:
-        if container_name:
-            for server in servers:
-                if container_name in server:
-                    return server.split('|')[1]
         return servers[0].split('|')[1]
     return None
 
@@ -158,8 +146,11 @@ async def on_ready():
 @tasks.loop(seconds=5)
 async def change_status():
     try:
-        instance_count = count_all_servers()
-        status = f"🌐 Managing {instance_count}/{MAX_GLOBAL_VPS} VPS instances"
+        instance_count = 0
+        if os.path.exists(database_file):
+            with open(database_file, 'r') as f:
+                instance_count = len(f.readlines())
+        status = f"🌐 Managing {instance_count} VPS instances"
         await bot.change_presence(
             activity=discord.Activity(
                 type=discord.ActivityType.watching,
@@ -211,8 +202,7 @@ async def system_status(interaction: discord.Interaction):
         name="🖥️ System Information",
         value=f"**OS:** {status['os']}\n"
               f"**Uptime:** {status['uptime']}\n"
-              f"**Containers:** {status['containers']['running']}/{status['containers']['total']} running\n"
-              f"**VPS Limit:** {count_all_servers()}/{MAX_GLOBAL_VPS} used",
+              f"**Containers:** {status['containers']['running']}/{status['containers']['total']} running",
         inline=False
     )
     
@@ -464,6 +454,15 @@ async def restart_server(interaction: discord.Interaction, container_name: str):
         )
         await interaction.response.send_message(embed=embed)
 
+def get_container_id_from_database(user, container_name):
+    if not os.path.exists(database_file):
+        return None
+    with open(database_file, 'r') as f:
+        for line in f:
+            if line.startswith(user) and container_name in line:
+                return line.split('|')[1]
+    return None
+
 async def create_server_task(interaction):
     embed = create_embed(
         title="🚀 Provisioning VPS",
@@ -473,22 +472,10 @@ async def create_server_task(interaction):
     await interaction.response.send_message(embed=embed)
     
     user = str(interaction.user)
-    
-    # Check user limit
     if count_user_servers(user) >= SERVER_LIMIT:
         embed = create_embed(
-            title="❌ User Limit Reached",
+            title="❌ Limit Reached",
             description="You've reached your maximum allowed instances.",
-            color=COLOR_ERROR
-        )
-        await interaction.followup.send(embed=embed)
-        return
-    
-    # Check global limit
-    if count_all_servers() >= MAX_GLOBAL_VPS:
-        embed = create_embed(
-            title="❌ System at Capacity",
-            description="All available VPS instances are currently in use. Please try again later.",
             color=COLOR_ERROR
         )
         await interaction.followup.send(embed=embed)
