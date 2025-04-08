@@ -1,0 +1,549 @@
+import discord
+from discord.ext import commands, tasks
+import docker
+import asyncio
+from discord import app_commands
+from datetime import datetime
+import psutil
+import platform
+import sqlite3
+import subprocess
+
+# Configuration
+TOKEN = 'YOUR_BOT_TOKEN_HERE'
+SERVER_ID = 123456789  # YOUR_DISCORD_SERVER_ID_HERE
+MAX_GLOBAL_VPS = 10
+DATABASE_FILE = 'vps_manager.db'
+BANNER_URL = "https://example.com/banner.jpg"
+
+# Color scheme
+COLOR_PRIMARY = 0x6A5ACD
+COLOR_SUCCESS = 0x2ECC71
+COLOR_ERROR = 0xE74C3C
+COLOR_WARNING = 0xF39C12
+COLOR_INFO = 0x3498DB
+
+# Plans configuration
+PLANS = {
+    "basic": {
+        "name": "Basic Plan",
+        "invites_required": 0,
+        "max_servers": 1,
+        "cpu": "1",
+        "ram": "2g",
+        "storage": "25GB SSD",
+        "image": "ubuntu-22.04-basic"
+    },
+    "standard": {
+        "name": "Standard Plan",
+        "invites_required": 2,
+        "max_servers": 3,
+        "cpu": "2",
+        "ram": "4g",
+        "storage": "50GB SSD", 
+        "image": "ubuntu-22.04-standard"
+    },
+    "premium": {
+        "name": "Premium Plan",
+        "invites_required": 5,
+        "max_servers": 5,
+        "cpu": "4",
+        "ram": "8g",
+        "storage": "100GB SSD",
+        "image": "ubuntu-22.04-premium"
+    }
+}
+
+# Initialize bot
+intents = discord.Intents.default()
+intents.members = True
+intents.message_content = True
+
+bot = commands.Bot(command_prefix='/', intents=intents)
+client = docker.from_env()
+
+# Database setup
+def init_db():
+    conn = sqlite3.connect(DATABASE_FILE)
+    c = conn.cursor()
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS servers
+                 (user_id TEXT, container_id TEXT PRIMARY KEY, 
+                  ssh_command TEXT, plan TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+                  
+    c.execute('''CREATE TABLE IF NOT EXISTS invites
+                 (inviter_id TEXT, invitee_id TEXT, 
+                  used INTEGER DEFAULT 1, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+                  
+    c.execute('''CREATE TABLE IF NOT EXISTS user_plans
+                 (user_id TEXT PRIMARY KEY, plan TEXT DEFAULT 'basic',
+                  invites_used INTEGER DEFAULT 0, upgraded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    
+    conn.commit()
+    conn.close()
+
+init_db()
+
+# Database helper functions
+def execute_db(query, params=(), fetchone=False, fetchall=False):
+    conn = sqlite3.connect(DATABASE_FILE)
+    c = conn.cursor()
+    c.execute(query, params)
+    conn.commit()
+    if fetchone:
+        result = c.fetchone()
+    elif fetchall:
+        result = c.fetchall()
+    else:
+        result = None
+    conn.close()
+    return result
+
+def add_server(user_id, container_id, ssh_command, plan):
+    execute_db("INSERT INTO servers VALUES (?, ?, ?, ?, datetime('now'))", 
+               (user_id, container_id, ssh_command, plan))
+
+def remove_server(container_id):
+    execute_db("DELETE FROM servers WHERE container_id=?", (container_id,))
+
+def count_all_servers():
+    result = execute_db("SELECT COUNT(*) FROM servers", fetchone=True)
+    return result[0] if result else 0
+
+def get_user_servers(user_id):
+    return execute_db("SELECT * FROM servers WHERE user_id=?", (user_id,), fetchall=True)
+
+def get_user_plan(user_id):
+    result = execute_db("SELECT plan FROM user_plans WHERE user_id=?", (user_id,), fetchone=True)
+    return result[0] if result else "basic"
+
+def set_user_plan(user_id, plan):
+    execute_db("INSERT OR REPLACE INTO user_plans (user_id, plan) VALUES (?, ?)", (user_id, plan))
+
+def get_user_invites(user_id):
+    result = execute_db("SELECT COUNT(*) FROM invites WHERE inviter_id=?", (user_id,), fetchone=True)
+    return result[0] if result else 0
+
+def add_invite(inviter_id, invitee_id):
+    execute_db("INSERT INTO invites (inviter_id, invitee_id) VALUES (?, ?)", (inviter_id, invitee_id))
+
+# Utility functions
+def create_embed(title=None, description=None, color=COLOR_PRIMARY):
+    embed = discord.Embed(
+        title=f"**{title}**" if title else None,
+        description=description,
+        color=color,
+        timestamp=datetime.utcnow()
+    )
+    if bot.user.avatar:
+        embed.set_footer(text="VPS Manager • Premium Cloud Hosting", icon_url=bot.user.avatar.url)
+    else:
+        embed.set_footer(text="VPS Manager • Premium Cloud Hosting")
+    if BANNER_URL:
+        embed.set_image(url=BANNER_URL)
+    return embed
+
+async def capture_ssh_session(container_id):
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "exec", container_id, "tmate", "-F",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            line = line.decode('utf-8').strip()
+            if "ssh session:" in line:
+                return line.split("ssh session:")[1].strip()
+    except Exception as e:
+        print(f"Error capturing SSH session: {e}")
+        return None
+
+def get_system_status():
+    cpu = psutil.cpu_percent()
+    mem = psutil.virtual_memory()
+    disk = psutil.disk_usage('/')
+    net = psutil.net_io_counters()
+    
+    try:
+        containers = len(client.containers.list(all=True))
+        running = len(client.containers.list())
+    except:
+        containers = 0
+        running = 0
+    
+    return {
+        'cpu': cpu,
+        'ram': {
+            'total': mem.total / (1024**3),
+            'used': mem.used / (1024**3),
+            'percent': mem.percent
+        },
+        'disk': {
+            'total': disk.total / (1024**3),
+            'used': disk.used / (1024**3),
+            'percent': disk.percent
+        },
+        'network': {
+            'sent': net.bytes_sent / (1024**2),
+            'recv': net.bytes_recv / (1024**2)
+        },
+        'os': f"{platform.system()} {platform.release()}",
+        'containers': {
+            'total': containers,
+            'running': running
+        },
+        'uptime': str(datetime.now() - datetime.fromtimestamp(psutil.boot_time())).split('.')[0]
+    }
+
+# Bot events
+@bot.event
+async def on_ready():
+    print(f'Logged in as {bot.user} (ID: {bot.user.id})')
+    print('------')
+    try:
+        synced = await bot.tree.sync()
+        print(f"Synced {len(synced)} commands")
+    except Exception as e:
+        print(f"Error syncing commands: {e}")
+    update_status.start()
+
+@bot.event
+async def on_member_join(member):
+    if member.guild.id != SERVER_ID:
+        return
+        
+    try:
+        async for entry in member.guild.audit_logs(limit=5, action=discord.AuditLogAction.invite_create):
+            if isinstance(entry.target, discord.Invite):
+                add_invite(str(entry.user.id), str(member.id))
+                break
+    except Exception as e:
+        print(f"Error tracking invite: {e}")
+
+# Tasks
+@tasks.loop(seconds=30)
+async def update_status():
+    count = count_all_servers()
+    await bot.change_presence(
+        activity=discord.Activity(
+            type=discord.ActivityType.watching,
+            name=f"{count}/{MAX_GLOBAL_VPS} VPS instances"
+        )
+    )
+
+# Commands
+@bot.tree.command(name="deploy", description="Create a new VPS instance")
+async def deploy(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)
+    plan = get_user_plan(user_id)
+    
+    # Check limits
+    if count_all_servers() >= MAX_GLOBAL_VPS:
+        embed = create_embed(
+            title="❌ System at Capacity",
+            description="All available VPS instances are currently in use.",
+            color=COLOR_ERROR
+        )
+        await interaction.response.send_message(embed=embed)
+        return
+        
+    user_servers = get_user_servers(user_id)
+    if len(user_servers) >= PLANS[plan]["max_servers"]:
+        embed = create_embed(
+            title="❌ Plan Limit Reached",
+            description=f"You've reached your {PLANS[plan]['name']} limit of {PLANS[plan]['max_servers']} servers.",
+            color=COLOR_ERROR
+        )
+        await interaction.response.send_message(embed=embed)
+        return
+    
+    # Start deployment
+    embed = create_embed(
+        title="🚀 Deploying VPS",
+        description="Creating your new cloud instance...",
+        color=COLOR_INFO
+    )
+    await interaction.response.send_message(embed=embed)
+    
+    # Create container
+    try:
+        container_id = subprocess.check_output([
+            "docker", "run", "-itd",
+            "--cpus", PLANS[plan]["cpu"],
+            "--memory", PLANS[plan]["ram"],
+            PLANS[plan]["image"]
+        ]).decode('utf-8').strip()
+    except subprocess.CalledProcessError as e:
+        error_output = e.output.decode() if e.output else str(e)
+        embed = create_embed(
+            title="❌ Deployment Failed",
+            description=f"Failed to create container:\n```{error_output}```",
+            color=COLOR_ERROR
+        )
+        await interaction.followup.send(embed=embed)
+        return
+    
+    # Get SSH session
+    ssh_command = await capture_ssh_session(container_id)
+    if not ssh_command:
+        embed = create_embed(
+            title="⚠️ Partial Success",
+            description="Instance created but SSH setup failed.",
+            color=COLOR_WARNING
+        )
+        await interaction.followup.send(embed=embed)
+        subprocess.run(["docker", "rm", "-f", container_id], check=False)
+        return
+    
+    # Save to database and send success
+    add_server(user_id, container_id, ssh_command, plan)
+    
+    dm_embed = discord.Embed(
+        title="🎉 VPS Ready!",
+        description="Your new cloud instance is now available!",
+        color=COLOR_SUCCESS
+    )
+    dm_embed.add_field(name="Plan", value=PLANS[plan]['name'], inline=False)
+    dm_embed.add_field(name="SSH Command", value=f"```{ssh_command}```", inline=False)
+    dm_embed.add_field(name="Resources", 
+                      value=f"{PLANS[plan]['cpu']} vCPU | {PLANS[plan]['ram']} RAM | {PLANS[plan]['storage']}",
+                      inline=False)
+    
+    try:
+        await interaction.user.send(embed=dm_embed)
+    except discord.Forbidden:
+        pass
+    
+    embed = create_embed(
+        title="✅ Deployment Complete",
+        description="Your VPS is ready! Check your DMs for connection details.",
+        color=COLOR_SUCCESS
+    )
+    await interaction.followup.send(embed=embed)
+
+@bot.tree.command(name="list", description="List your VPS instances")
+async def list_servers(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)
+    servers = get_user_servers(user_id)
+    
+    if not servers:
+        embed = create_embed(
+            title="📋 Your Servers",
+            description="You don't have any active VPS instances.",
+            color=COLOR_INFO
+        )
+        await interaction.response.send_message(embed=embed)
+        return
+    
+    embed = create_embed(
+        title="📋 Your Servers",
+        color=COLOR_INFO
+    )
+    
+    for server in servers:
+        created_at = server[4][:16] if len(server) > 4 else "Unknown"
+        embed.add_field(
+            name=f"Instance {server[1][:8]}",
+            value=f"**Plan:** {server[3]}\n**Created:** {created_at}",
+            inline=True
+        )
+    
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="remove", description="Delete a VPS instance")
+@app_commands.describe(container_id="The container ID to remove")
+async def remove_server(interaction: discord.Interaction, container_id: str):
+    user_id = str(interaction.user.id)
+    servers = get_user_servers(user_id)
+    
+    # Verify ownership
+    if not any(container_id == s[1] for s in servers):
+        embed = create_embed(
+            title="❌ Access Denied",
+            description="You don't own this VPS instance.",
+            color=COLOR_ERROR
+        )
+        await interaction.response.send_message(embed=embed)
+        return
+    
+    # Remove container
+    try:
+        subprocess.run(["docker", "rm", "-f", container_id], check=True)
+        remove_server(container_id)
+        
+        embed = create_embed(
+            title="✅ Instance Removed",
+            description=f"VPS {container_id[:8]} has been deleted.",
+            color=COLOR_SUCCESS
+        )
+        await interaction.response.send_message(embed=embed)
+    except subprocess.CalledProcessError as e:
+        embed = create_embed(
+            title="❌ Removal Failed",
+            description=f"Failed to remove container:\n```{e}```",
+            color=COLOR_ERROR
+        )
+        await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="claim-plan", description="Claim a plan based on your invites")
+@app_commands.describe(plan="The plan to claim (basic, standard, premium)")
+async def claim_plan(interaction: discord.Interaction, plan: str):
+    user_id = str(interaction.user.id)
+    plan = plan.lower()
+    
+    if plan not in PLANS:
+        embed = create_embed(
+            title="❌ Invalid Plan",
+            description=f"Available plans: {', '.join(PLANS.keys())}",
+            color=COLOR_ERROR
+        )
+        await interaction.response.send_message(embed=embed)
+        return
+    
+    current_plan = get_user_plan(user_id)
+    invites = get_user_invites(user_id)
+    required = PLANS[plan]["invites_required"]
+    
+    if PLANS[current_plan]["invites_required"] >= required:
+        embed = create_embed(
+            title="ℹ️ Plan Not Changed",
+            description=f"You already have an equal or better plan.",
+            color=COLOR_INFO
+        )
+        await interaction.response.send_message(embed=embed)
+        return
+        
+    if invites < required:
+        embed = create_embed(
+            title="❌ Not Enough Invites",
+            description=f"You need {required} invites for {PLANS[plan]['name']} (you have {invites}).",
+            color=COLOR_ERROR
+        )
+        await interaction.response.send_message(embed=embed)
+        return
+    
+    set_user_plan(user_id, plan)
+    
+    embed = create_embed(
+        title="✅ Plan Upgraded",
+        description=f"You've been upgraded to {PLANS[plan]['name']}!\n\n"
+                   f"**New Limits:**\n"
+                   f"- Max Servers: {PLANS[plan]['max_servers']}\n"
+                   f"- CPU: {PLANS[plan]['cpu']} vCPU\n"
+                   f"- RAM: {PLANS[plan]['ram']}\n"
+                   f"- Storage: {PLANS[plan]['storage']}",
+        color=COLOR_SUCCESS
+    )
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="my-plan", description="View your current plan and invites")
+async def my_plan(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)
+    plan = get_user_plan(user_id)
+    invites = get_user_invites(user_id)
+    servers = get_user_servers(user_id)
+    
+    embed = create_embed(
+        title=f"📊 Your {PLANS[plan]['name']}",
+        color=COLOR_INFO
+    )
+    
+    embed.add_field(
+        name="Plan Details",
+        value=f"**Servers:** {len(servers)}/{PLANS[plan]['max_servers']}\n"
+              f"**CPU:** {PLANS[plan]['cpu']} vCPU\n"
+              f"**RAM:** {PLANS[plan]['ram']}\n"
+              f"**Storage:** {PLANS[plan]['storage']}",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="Invites",
+        value=f"You have **{invites}** successful invites",
+        inline=False
+    )
+    
+    # Show available upgrades
+    upgrades = []
+    for p_name, p_data in PLANS.items():
+        if p_data["invites_required"] > PLANS[plan]["invites_required"] and invites >= p_data["invites_required"]:
+            upgrades.append(f"- {p_data['name']} (`/{p_name}`)")
+    
+    if upgrades:
+        embed.add_field(
+            name="Available Upgrades",
+            value="\n".join(upgrades),
+            inline=False
+        )
+    
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="status", description="View system status")
+async def status(interaction: discord.Interaction):
+    status = get_system_status()
+    
+    embed = create_embed(
+        title="📊 System Status",
+        color=COLOR_INFO
+    )
+    
+    # System info
+    embed.add_field(
+        name="🖥️ System",
+        value=f"**OS:** {status['os']}\n"
+              f"**Uptime:** {status['uptime']}\n"
+              f"**Containers:** {status['containers']['running']}/{status['containers']['total']} running\n"
+              f"**VPS Limit:** {count_all_servers()}/{MAX_GLOBAL_VPS}",
+        inline=False
+    )
+    
+    # Resource usage
+    embed.add_field(
+        name="📈 Resources",
+        value=f"**CPU:** {status['cpu']}%\n"
+              f"**RAM:** {status['ram']['used']:.1f}/{status['ram']['total']:.1f}GB ({status['ram']['percent']}%)\n"
+              f"**Disk:** {status['disk']['used']:.1f}/{status['disk']['total']:.1f}GB ({status['disk']['percent']}%)\n"
+              f"**Network:** ↑{status['network']['sent']:.1f}MB ↓{status['network']['recv']:.1f}MB",
+        inline=False
+    )
+    
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="help", description="Show command help")
+async def help_command(interaction: discord.Interaction):
+    embed = create_embed(
+        title="📚 VPS Manager Help",
+        color=COLOR_PRIMARY
+    )
+    
+    embed.add_field(
+        name="🚀 Instance Management",
+        value="▸ `/deploy` - Create new VPS\n"
+              "▸ `/list` - List your servers\n"
+              "▸ `/remove` - Delete a server",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="📊 Account",
+        value="▸ `/claim-plan` - Upgrade your plan\n"
+              "▸ `/my-plan` - View your current plan",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="ℹ️ Information",
+        value="▸ `/status` - System status\n"
+              "▸ `/help` - This message",
+        inline=False
+    )
+    
+    await interaction.response.send_message(embed=embed)
+
+# Start the bot
+if __name__ == "__main__":
+    bot.run(TOKEN)
