@@ -10,7 +10,7 @@ import sqlite3
 import subprocess
 
 # Configuration
-TOKEN = 'YOUR_BOT_TOKEN_HERE'
+TOKEN = ''
 SERVER_ID = 123456789  # YOUR_DISCORD_SERVER_ID_HERE
 MAX_GLOBAL_VPS = 10
 DATABASE_FILE = 'vps_manager.db'
