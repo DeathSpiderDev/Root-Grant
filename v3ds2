@@ -11,7 +11,7 @@ import subprocess
 
 # Configuration
 TOKEN = 'YOUR_BOT_TOKEN_HERE'
-SERVER_ID = 1358788778457694218
+SERVER_ID = 123456789  # YOUR_DISCORD_SERVER_ID_HERE
 MAX_GLOBAL_VPS = 10
 DATABASE_FILE = 'vps_manager.db'
 BANNER_URL = "https://example.com/banner.jpg"
@@ -29,8 +29,8 @@ PLANS = {
         "name": "Basic Plan",
         "invites_required": 0,
         "max_servers": 1,
-        "cpu": "1 vCPU",
-        "ram": "2GB",
+        "cpu": "1",
+        "ram": "2g",
         "storage": "25GB SSD",
         "image": "ubuntu-22.04-basic"
     },
@@ -38,8 +38,8 @@ PLANS = {
         "name": "Standard Plan",
         "invites_required": 2,
         "max_servers": 3,
-        "cpu": "2 vCPU",
-        "ram": "4GB",
+        "cpu": "2",
+        "ram": "4g",
         "storage": "50GB SSD", 
         "image": "ubuntu-22.04-standard"
     },
@@ -47,8 +47,8 @@ PLANS = {
         "name": "Premium Plan",
         "invites_required": 5,
         "max_servers": 5,
-        "cpu": "4 vCPU",
-        "ram": "8GB",
+        "cpu": "4",
+        "ram": "8g",
         "storage": "100GB SSD",
         "image": "ubuntu-22.04-premium"
     }
@@ -85,15 +85,17 @@ def init_db():
 init_db()
 
 # Database helper functions
-def execute_db(query, params=(), fetchone=False):
+def execute_db(query, params=(), fetchone=False, fetchall=False):
     conn = sqlite3.connect(DATABASE_FILE)
     c = conn.cursor()
     c.execute(query, params)
     conn.commit()
     if fetchone:
         result = c.fetchone()
-    else:
+    elif fetchall:
         result = c.fetchall()
+    else:
+        result = None
     conn.close()
     return result
 
@@ -105,10 +107,11 @@ def remove_server(container_id):
     execute_db("DELETE FROM servers WHERE container_id=?", (container_id,))
 
 def count_all_servers():
-    return execute_db("SELECT COUNT(*) FROM servers", fetchone=True)[0]
+    result = execute_db("SELECT COUNT(*) FROM servers", fetchone=True)
+    return result[0] if result else 0
 
 def get_user_servers(user_id):
-    return execute_db("SELECT * FROM servers WHERE user_id=?", (user_id,))
+    return execute_db("SELECT * FROM servers WHERE user_id=?", (user_id,), fetchall=True)
 
 def get_user_plan(user_id):
     result = execute_db("SELECT plan FROM user_plans WHERE user_id=?", (user_id,), fetchone=True)
@@ -118,7 +121,8 @@ def set_user_plan(user_id, plan):
     execute_db("INSERT OR REPLACE INTO user_plans (user_id, plan) VALUES (?, ?)", (user_id, plan))
 
 def get_user_invites(user_id):
-    return execute_db("SELECT COUNT(*) FROM invites WHERE inviter_id=?", (user_id,), fetchone=True)[0]
+    result = execute_db("SELECT COUNT(*) FROM invites WHERE inviter_id=?", (user_id,), fetchone=True)
+    return result[0] if result else 0
 
 def add_invite(inviter_id, invitee_id):
     execute_db("INSERT INTO invites (inviter_id, invitee_id) VALUES (?, ?)", (inviter_id, invitee_id))
@@ -131,8 +135,12 @@ def create_embed(title=None, description=None, color=COLOR_PRIMARY):
         color=color,
         timestamp=datetime.utcnow()
     )
-    embed.set_footer(text="VPS Manager • Premium Cloud Hosting", icon_url=bot.user.avatar.url)
-    embed.set_image(url=BANNER_URL)
+    if bot.user.avatar:
+        embed.set_footer(text="VPS Manager • Premium Cloud Hosting", icon_url=bot.user.avatar.url)
+    else:
+        embed.set_footer(text="VPS Manager • Premium Cloud Hosting")
+    if BANNER_URL:
+        embed.set_image(url=BANNER_URL)
     return embed
 
 async def capture_ssh_session(container_id):
@@ -194,16 +202,24 @@ def get_system_status():
 # Bot events
 @bot.event
 async def on_ready():
-    print(f'Logged in as {bot.user}')
-    await bot.tree.sync()
+    print(f'Logged in as {bot.user} (ID: {bot.user.id})')
+    print('------')
+    try:
+        synced = await bot.tree.sync()
+        print(f"Synced {len(synced)} commands")
+    except Exception as e:
+        print(f"Error syncing commands: {e}")
     update_status.start()
 
 @bot.event
 async def on_member_join(member):
+    if member.guild.id != SERVER_ID:
+        return
+        
     try:
         async for entry in member.guild.audit_logs(limit=5, action=discord.AuditLogAction.invite_create):
-            if entry.target == member:
-                add_invite(entry.user.id, member.id)
+            if isinstance(entry.target, discord.Invite):
+                add_invite(str(entry.user.id), str(member.id))
                 break
     except Exception as e:
         print(f"Error tracking invite: {e}")
@@ -235,7 +251,8 @@ async def deploy(interaction: discord.Interaction):
         await interaction.response.send_message(embed=embed)
         return
         
-    if len(get_user_servers(user_id)) >= PLANS[plan]["max_servers"]:
+    user_servers = get_user_servers(user_id)
+    if len(user_servers) >= PLANS[plan]["max_servers"]:
         embed = create_embed(
             title="❌ Plan Limit Reached",
             description=f"You've reached your {PLANS[plan]['name']} limit of {PLANS[plan]['max_servers']} servers.",
@@ -255,13 +272,16 @@ async def deploy(interaction: discord.Interaction):
     # Create container
     try:
         container_id = subprocess.check_output([
-            "docker", "run", "-itd", "--cpus", PLANS[plan]["cpu"].split()[0],
-            "--memory", PLANS[plan]["ram"], PLANS[plan]["image"]
+            "docker", "run", "-itd",
+            "--cpus", PLANS[plan]["cpu"],
+            "--memory", PLANS[plan]["ram"],
+            PLANS[plan]["image"]
         ]).decode('utf-8').strip()
     except subprocess.CalledProcessError as e:
+        error_output = e.output.decode() if e.output else str(e)
         embed = create_embed(
             title="❌ Deployment Failed",
-            description=f"Failed to create container:\n```{e.output.decode()}```",
+            description=f"Failed to create container:\n```{error_output}```",
             color=COLOR_ERROR
         )
         await interaction.followup.send(embed=embed)
@@ -276,7 +296,7 @@ async def deploy(interaction: discord.Interaction):
             color=COLOR_WARNING
         )
         await interaction.followup.send(embed=embed)
-        subprocess.run(["docker", "rm", "-f", container_id])
+        subprocess.run(["docker", "rm", "-f", container_id], check=False)
         return
     
     # Save to database and send success
@@ -287,14 +307,15 @@ async def deploy(interaction: discord.Interaction):
         description="Your new cloud instance is now available!",
         color=COLOR_SUCCESS
     )
-    dm_embed.add_field(name="Plan", value=PLANS[plan]['name'])
+    dm_embed.add_field(name="Plan", value=PLANS[plan]['name'], inline=False)
     dm_embed.add_field(name="SSH Command", value=f"```{ssh_command}```", inline=False)
     dm_embed.add_field(name="Resources", 
-                      value=f"{PLANS[plan]['cpu']} | {PLANS[plan]['ram']} | {PLANS[plan]['storage']}")
+                      value=f"{PLANS[plan]['cpu']} vCPU | {PLANS[plan]['ram']} RAM | {PLANS[plan]['storage']}",
+                      inline=False)
     
     try:
         await interaction.user.send(embed=dm_embed)
-    except:
+    except discord.Forbidden:
         pass
     
     embed = create_embed(
@@ -324,9 +345,10 @@ async def list_servers(interaction: discord.Interaction):
     )
     
     for server in servers:
+        created_at = server[4][:16] if len(server) > 4 else "Unknown"
         embed.add_field(
             name=f"Instance {server[1][:8]}",
-            value=f"**Plan:** {server[3]}\n**Created:** {server[4][:16]}",
+            value=f"**Plan:** {server[3]}\n**Created:** {created_at}",
             inline=True
         )
     
@@ -411,7 +433,7 @@ async def claim_plan(interaction: discord.Interaction, plan: str):
         description=f"You've been upgraded to {PLANS[plan]['name']}!\n\n"
                    f"**New Limits:**\n"
                    f"- Max Servers: {PLANS[plan]['max_servers']}\n"
-                   f"- CPU: {PLANS[plan]['cpu']}\n"
+                   f"- CPU: {PLANS[plan]['cpu']} vCPU\n"
                    f"- RAM: {PLANS[plan]['ram']}\n"
                    f"- Storage: {PLANS[plan]['storage']}",
         color=COLOR_SUCCESS
@@ -433,7 +455,7 @@ async def my_plan(interaction: discord.Interaction):
     embed.add_field(
         name="Plan Details",
         value=f"**Servers:** {len(servers)}/{PLANS[plan]['max_servers']}\n"
-              f"**CPU:** {PLANS[plan]['cpu']}\n"
+              f"**CPU:** {PLANS[plan]['cpu']} vCPU\n"
               f"**RAM:** {PLANS[plan]['ram']}\n"
               f"**Storage:** {PLANS[plan]['storage']}",
         inline=False
@@ -523,4 +545,5 @@ async def help_command(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 # Start the bot
-bot.run(TOKEN)
+if __name__ == "__main__":
+    bot.run(TOKEN)
