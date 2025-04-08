@@ -11,7 +11,7 @@ import subprocess
 
 # Configuration
 TOKEN = 'YOUR_BOT_TOKEN_HERE'
-SERVER_ID = YOUR_DISCORD_SERVER_ID_HERE
+SERVER_ID = 1358788778457694218
 MAX_GLOBAL_VPS = 10
 DATABASE_FILE = 'vps_manager.db'
 BANNER_URL = "https://example.com/banner.jpg"
