@@ -1,0 +1,33 @@
+name: Create Random YML
+
+on:
+  workflow_dispatch: # You can trigger it manually
+
+jobs:
+  generate-file:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Generate random YML file
+      run: |
+        RANDOM_NAME=$(cat /dev/urandom | tr -dc 'a-z0-9' | fold -w 8 | head -n 1)
+        FILE_NAME=".github/workflows/${RANDOM_NAME}.yml"
+        echo "name: Random Workflow" > "$FILE_NAME"
+        echo "on: [push]" >> "$FILE_NAME"
+        echo "jobs:" >> "$FILE_NAME"
+        echo "  example:" >> "$FILE_NAME"
+        echo "    runs-on: ubuntu-latest" >> "$FILE_NAME"
+        echo "    steps:" >> "$FILE_NAME"
+        echo "      - run: echo Hello from random workflow!" >> "$FILE_NAME"
+        echo "Created $FILE_NAME"
+        
+    - name: Commit and push
+      run: |
+        git config --global user.name 'github-actions'
+        git config --global user.email 'github-actions@github.com'
+        git add .github/workflows/*.yml
+        git commit -m "Add random workflow file"
+        git push
